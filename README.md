@@ -105,49 +105,49 @@ DESCRIBE DATABASE caged_db;
 ### Script para tabela no Hive
 ```sql
 CREATE EXTERNAL TABLE fato_caged (
-  -- colunas originais
-  competenciamov        STRING,
-  competenciaexc        STRING,
-  regiao                INT,
-  uf                    INT,
+  competenciamov        BIGINT,
+  competenciaexc        BIGINT,
+  regiao                BIGINT,
+  uf                    BIGINT,
   municipio             STRING,
   secao                 STRING,
-  subclasse             STRING,
-  cbo2002ocupacao       STRING,
-  categoria             INT,
-  graudeinstrucao       INT,
-  idade                 INT,
+  subclasse             BIGINT,
+  saldomovimentacao     BIGINT,
+  cbo2002ocupacao       BIGINT,
+  categoria             BIGINT,
+  graudeinstrucao       BIGINT,
+  idade                 DOUBLE,
   horascontratuais      STRING,
-  racacor               INT,
-  sexo                  INT,
-  tipoempregador        INT,
-  tipoestabelecimento   INT,
-  tipomovimentacao      INT,
-  tipodeficiencia       INT,
-  indtrabintermitente   INT,
-  indtrabparcial        INT,
-  salario               DECIMAL(10,2),
-  tamestabjan           INT,
-  indicadoraprendiz     INT,
-  origemdainformacao    INT,
-  indicadordeforadoprazo INT,
-  unidadesalariocodigo  INT,
-  valorsalariofixo      DECIMAL(10,2),
-  indicadordeexclusao   INT,
+  racacor               BIGINT,
+  sexo                  BIGINT,
+  tipoempregador        BIGINT,
+  tipoestabelecimento   BIGINT,
+  tipomovimentacao      BIGINT,
+  tipodeficiencia       BIGINT,
+  indtrabintermitente   BIGINT,
+  indtrabparcial        BIGINT,
+  salario               STRING,
+  tamestabjan           BIGINT,
+  indicadoraprendiz     BIGINT,
+  origemdainformacao    BIGINT,
+  indicadordeforadoprazo BIGINT,
+  unidadesalariocodigo  BIGINT,
+  valorsalariofixo      STRING,
+  indicadordeexclusao   BIGINT,
 
   -- novas colunas
-  ano_mov               INT,
-  natureza_evento       STRING,   -- admissao / desligamento
-  impacto_saldo         INT       
+  ano_mov               STRING,
+  natureza_evento       STRING,
+  impacto_saldo         BIGINT,
+  faixa_etaria          STRING
 )
 PARTITIONED BY (
-  ano_dec INT,                  -- ano da declaração
-  origem_declaracao STRING,      -- PRAZO / FORA_PRAZO / EXCLUSAO
-  competenciadec        STRING
+  ano_dec STRING,
+  competenciadec STRING,
+  origem_declaracao STRING
 )
 STORED AS PARQUET
 LOCATION 'gs://bucket_caged/caged_unificado/';
-
 ```
 
 Carregar partições:
@@ -295,12 +295,10 @@ SELECT * FROM caged_db.dim_cbo LIMIT 10;
 ![alt text](imagens/tabelas.png)
 
 # Respondendo perguntas com Hive
+O período analisado foi de 2020 a 2025.
 
-### 1. Admissões e desligamentos
-
-- Quantas admissões e desligamentos ocorreram em cada ano?
-- Qual foi o principal motivo de movimentação em cada ano?
-
+## Admissões e desligamentos
+### 1. Quantas admissões e desligamentos ocorreram em cada ano?
 ```sql
 SELECT 
     f.ano_dec,
@@ -317,86 +315,264 @@ ORDER BY f.ano_dec, qtd_mov DESC;
 ![alt text](imagens/query1-1.png)
 ![alt text](imagens/query1-2.png)
 
-### 2. Saldo de movimentações por região e UF
+### 2. Qual foi o principal motivo de movimentação em cada ano?
+```sql
+WITH ranked AS (
+    SELECT 
+        f.ano_dec,
+        m.descricao_motivo,
+        COUNT(*) AS qtd_mov,
+        ROW_NUMBER() OVER (PARTITION BY f.ano_dec ORDER BY COUNT(*) DESC) AS rn
+    FROM fato_caged f
+    LEFT JOIN dim_motivo m
+        ON f.tipomovimentacao = m.tipomovimentacao
+    GROUP BY f.ano_dec, m.descricao_motivo
+)
+SELECT ano_dec, descricao_motivo, qtd_mov
+FROM ranked
+WHERE rn = 1
+ORDER BY ano_dec;
+```
 
-- Quais regiões geraram mais empregos ao longo do período analisado?
-- Em quais estados o saldo de empregos foi mais positivo ou negativo?
-- Existe alguma concentração de saldo de empregos em determinada região do país?
+![alt text](imagens/query2.png)
+![alt text](imagens/query2-1.png)
+
+## Saldo de movimentações por região e UF
+
+### 3. Quais regiões geraram mais empregos ao longo do período analisado?
 ```sql
 SELECT 
     r.descricao_regiao,
-    u.descricao_uf,
     SUM(f.saldomovimentacao) AS saldo_emprego
 FROM fato_caged f
 LEFT JOIN dim_regiao r
-    ON f.regiao = r.codigo
-LEFT JOIN dim_uf u
-    ON f.uf = u.codigo
-GROUP BY r.descricao_regiao, u.descricao_uf
+    ON f.regiao = r.regiao
+GROUP BY r.descricao_regiao
 ORDER BY saldo_emprego DESC;
 ```
-### 3. Distribuição por setor econômico
+![alt text](imagens/query3.png)
+![alt text](imagens/query3-1.png)
 
-- Quais setores da economia mais contrataram ou desligaram trabalhadores?
-- Qual setor apresentou o maior saldo líquido de empregos?
-- Há setores que consistentemente apresentam saldos negativos?
 
+### 4. Em quais estados o saldo de empregos foi mais positivo ou negativo?
+```sql
+SELECT 
+    u.descricao_uf,
+    SUM(f.saldomovimentacao) AS saldo_emprego
+FROM fato_caged f
+LEFT JOIN dim_uf u
+    ON f.uf = u.uf
+GROUP BY u.descricao_uf
+ORDER BY saldo_emprego DESC;
+```
+![alt text](imagens/query-4.png)
+
+### 5. Existe alguma concentração de saldo de empregos em determinada região do país?
+```sql
+SELECT 
+    r.descricao_regiao,
+    SUM(f.saldomovimentacao) AS saldo_regiao,
+    ROUND(100.0 * SUM(f.saldomovimentacao) / SUM(SUM(f.saldomovimentacao)) OVER (), 2) AS perc_nacional
+FROM fato_caged f
+LEFT JOIN dim_regiao r
+    ON f.regiao = r.regiao
+GROUP BY r.descricao_regiao
+ORDER BY perc_nacional DESC;
+```
+![alt text](imagens/query5.png)
+
+# Limitação da instância prejudicou a execução das queries a partir daqui. Incluídas na proposta de evolução do trabalho
+## Distribuição por setor econômico
+
+### 6. Quais setores da economia mais contrataram ou desligaram trabalhadores em 2025?
 ```sql
 SELECT 
     s.descricao_secao,
-    COUNT(*) AS qtd_mov,
+    COUNT(*) AS qtd_mov
+FROM fato_caged f
+LEFT JOIN dim_secao s
+    ON f.secao = s.secao
+GROUP BY s.descricao_secao
+ORDER BY qtd_mov DESC;
+```
+
+Teste de envio de Job:
+```
+gcloud dataproc jobs submit hive \
+  --cluster=cluster-caged \
+  --region=us-central1 \
+  --execute="USE caged_db;
+             SELECT 
+                  s.descricao_secao,
+                  COUNT(*) AS qtd_mov
+              FROM fato_caged f
+              LEFT JOIN dim_secao s
+                  ON f.secao = s.secao
+              WHERE f.ano_dec = 2025
+                AND f.origem_declaracao = 'PRAZO'
+              GROUP BY s.descricao_secao
+              ORDER BY qtd_mov DESC
+              LIMIT 10;"
+```
+
+### 7. Qual setor apresentou o maior saldo líquido de empregos?
+```sql
+SELECT 
+    s.descricao_secao,
     SUM(f.saldomovimentacao) AS saldo_emprego
 FROM fato_caged f
 LEFT JOIN dim_secao s
     ON f.secao = s.secao
 GROUP BY s.descricao_secao
-ORDER BY saldo_emprego DESC;
+ORDER BY saldo_emprego DESC
+LIMIT 1;
 ```
-### 4. Escolaridade dos admitidos
 
-- Qual é o nível de escolaridade predominante entre os admitidos?
-- O perfil de escolaridade dos admitidos mudou ao longo dos anos?
-- Trabalhadores com ensino superior têm participação relevante nas admissões?
 
+### 8. Há setores que consistentemente apresentam saldos negativos?
+```sql
+SELECT 
+    f.ano_dec,
+    s.descricao_secao,
+    SUM(f.saldomovimentacao) AS saldo_emprego
+FROM fato_caged f
+LEFT JOIN dim_secao s
+    ON f.secao = s.secao
+GROUP BY f.ano_dec, s.descricao_secao
+HAVING SUM(f.saldomovimentacao) < 0
+ORDER BY s.descricao_secao, f.ano_dec;
+```
+## Escolaridade dos admitidos
+
+### 9. Qual é o nível de escolaridade predominante entre os admitidos?
 ```sql
 SELECT 
     g.descricao_graudeinstrucao,
     COUNT(*) AS qtd
 FROM fato_caged f
 LEFT JOIN dim_graudeinstrucao g
-    ON f.graudeinstrucao = g.codigo
-WHERE f.tipomovimentacao IN (10, 20, 25, 35, 70) -- códigos de admissão
+    ON f.graudeinstrucao = g.graudeinstrucao
+WHERE f.tipomovimentacao IN (10, 20, 25, 35, 70, 97)
 GROUP BY g.descricao_graudeinstrucao
-ORDER BY qtd DESC;
+ORDER BY qtd DESC
+LIMIT 1;
 ```
-### 5. Faixa etária × Motivo da movimentação
+### 10. O perfil de escolaridade dos admitidos mudou ao longo dos anos?
+```sql
+SELECT 
+    f.ano_dec,
+    g.descricao_graudeinstrucao,
+    COUNT(*) AS qtd
+FROM fato_caged f
+LEFT JOIN dim_graudeinstrucao g
+    ON f.graudeinstrucao = g.codigo
+WHERE f.tipomovimentacao IN (10, 20, 25, 35, 70, 97)
+GROUP BY f.ano_dec, g.descricao_graudeinstrucao
+ORDER BY f.ano_dec, qtd DESC;
+```
 
-- Qual faixa etária concentra mais admissões?
-- Qual faixa etária apresenta mais desligamentos a pedido?
-- Jovens (até 24 anos) são mais contratados em primeiro emprego ou em reemprego?
-- Trabalhadores acima de 60 anos são desligados majoritariamente por aposentadoria ou por outros motivos?
+### 11. Trabalhadores com ensino superior têm participação relevante nas admissões?
+```sql
+SELECT 
+    f.ano_dec,
+    CASE 
+        WHEN g.graudeinstrucao >= 9 THEN 'Nível Superior Completo ou acima'
+        ELSE 'Até Nível Médio'
+    END AS nivel,
+    COUNT(*) AS qtd
+FROM fato_caged f
+LEFT JOIN dim_graudeinstrucao g
+    ON f.graudeinstrucao = g.graudeinstrucao
+WHERE f.tipomovimentacao IN (10, 20, 25, 35, 70, 97)
+GROUP BY f.ano_dec,
+    CASE 
+        WHEN g.graudeinstrucao >= 9 THEN 'Nível Superior Completo ou acima'
+        ELSE 'Até Nível Médio'
+    END
+ORDER BY f.ano_dec, nivel;
+```
 
+## Faixa etária × Motivo da movimentação
+
+### 12. Qual faixa etária concentra mais admissões?
 ```sql
 SELECT 
     f.faixa_etaria,
-    m.descricao_motivo,
-    COUNT(*) AS qtd_mov
+    COUNT(*) AS qtd_admissoes
 FROM fato_caged f
-LEFT JOIN dim_motivo m
-    ON f.tipomovimentacao = m.codigo
-GROUP BY f.faixa_etaria, m.descricao_motivo
-ORDER BY f.faixa_etaria, qtd_mov DESC;
+WHERE f.tipomovimentacao IN (10, 20, 25, 35, 70, 97)
+GROUP BY f.faixa_etaria
+ORDER BY qtd_admissoes DESC
+LIMIT 1;
 ```
-### 6. Ranking de ocupações (CBO)
+### 13. Qual faixa etária apresenta mais desligamentos a pedido?
+```sql
+SELECT 
+    f.faixa_etaria,
+    COUNT(*) AS qtd_desligamentos
+FROM fato_caged f
+WHERE f.tipomovimentacao = 40
+GROUP BY f.faixa_etaria
+ORDER BY qtd_desligamentos DESC
+LIMIT 1;
+```
 
-- Quais ocupações mais geraram movimentações no período analisado?
-- Quais cargos mais contribuíram para o saldo positivo de empregos?
-- Existem ocupações com grande volume de admissões mas também alto volume de desligamentos?
+### 14. Jovens (até 24 anos) são mais contratados em primeiro emprego ou em reemprego?
+```sql
+SELECT 
+    CASE 
+        WHEN f.tipomovimentacao = 10 THEN 'Primeiro emprego'
+        WHEN f.tipomovimentacao = 20 THEN 'Reemprego'
+    END AS tipo_admissao,
+    COUNT(*) AS qtd
+FROM fato_caged f
+WHERE f.idade <= 24
+  AND f.tipomovimentacao IN (10, 20)
+GROUP BY 
+    CASE 
+        WHEN f.tipomovimentacao = 10 THEN 'Primeiro emprego'
+        WHEN f.tipomovimentacao = 20 THEN 'Reemprego'
+    END
+ORDER BY qtd DESC;
+```
 
+### 15. Trabalhadores acima de 60 anos são desligados majoritariamente por aposentadoria ou por outros motivos?
+```sql
+SELECT 
+    CASE 
+        WHEN f.tipomovimentacao = 50 THEN 'Aposentadoria'
+        ELSE 'Outros desligamentos'
+    END AS tipo_desligamento,
+    COUNT(*) AS qtd
+FROM fato_caged f
+WHERE f.idade >= 60
+  AND f.tipomovimentacao IN (31, 32, 40, 43, 45, 50, 60, 80, 90, 98, 99)
+GROUP BY 
+    CASE 
+        WHEN f.tipomovimentacao = 50 THEN 'Aposentadoria'
+        ELSE 'Outros desligamentos'
+    END
+ORDER BY qtd DESC;
+```
+## Ranking de ocupações (CBO)
+
+### 16. Quais ocupações mais geraram movimentações no período analisado (2020-2025)?
 ```sql
 SELECT 
     c.descricao_cbo,
-    COUNT(*) AS qtd_mov,
+    COUNT(*) AS qtd_mov
+FROM fato_caged f
+LEFT JOIN dim_cbo c
+    ON f.cbo2002ocupacao = c.cbo
+GROUP BY c.descricao_cbo
+ORDER BY qtd_mov DESC
+LIMIT 20;
+```
+
+### 17. Quais cargos mais contribuíram para o saldo positivo de empregos?
+```sql
+SELECT 
+    c.descricao_cbo,
     SUM(f.saldomovimentacao) AS saldo_emprego
 FROM fato_caged f
 LEFT JOIN dim_cbo c
@@ -406,8 +582,25 @@ ORDER BY saldo_emprego DESC
 LIMIT 20;
 ```
 
+### 18. Existem ocupações com grande volume de admissões mas também alto volume de desligamentos?
+```sql
+SELECT 
+    c.descricao_cbo,
+    SUM(CASE WHEN f.saldomovimentacao = 1  THEN 1 ELSE 0 END) AS qtd_admissoes,
+    SUM(CASE WHEN f.saldomovimentacao = -1 THEN 1 ELSE 0 END) AS qtd_desligamentos
+FROM fato_caged f
+LEFT JOIN dim_cbo c
+    ON f.cbo2002ocupacao = c.cbo
+GROUP BY c.descricao_cbo
+HAVING SUM(CASE WHEN f.saldomovimentacao = 1  THEN 1 ELSE 0 END) > 50000
+   AND SUM(CASE WHEN f.saldomovimentacao = -1 THEN 1 ELSE 0 END) > 50000
+ORDER BY qtd_admissoes DESC, qtd_desligamentos DESC
+LIMIT 20;
+```
+
 # Proposta de evolução do trabalho
 
+- Alterar a instância do Dataproc para mais de um nó para conseguir rodar as queries 6 a 18. O planejado era rodar todas essas queries mas a instância está quebrando devido ao volume de dados. 
 - Inclusão de novas dimensões para aumentar a qualidade da análise (considerar todas as dimensões do dicionário de dados).
 - Inclusão de novas bases de dados como RAIS e IBGE.
 - Entrega de resultados em ferramenta de DataViz como Google Looker Studio.
